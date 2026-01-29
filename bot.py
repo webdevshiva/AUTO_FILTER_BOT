@@ -470,17 +470,13 @@ async def index_command(client, message):
 # ============================================
 # BOT RUNNER
 # ============================================
+# bot.py - LAST LINES ONLY:
 async def main():
     await app.start()
     bot = await app.get_me()
-    print(f"🤖 Bot Started: @{bot.username}")
-    print("✅ All features loaded!")
+    print(f"✅ Bot Started: @{bot.username}")
+    print("📢 Bot is now running!")
     await idle()
 
-if __name__ == "__main__":
-    try:
-        app.run(main())
-    except KeyboardInterrupt:
-        print("\n👋 Bot stopped")
-    except Exception as e:
-        print(f"❌ Error: {e}")
+# ✅ NO CODE AFTER THIS LINE
+# ✅ Let app.py import and run this
