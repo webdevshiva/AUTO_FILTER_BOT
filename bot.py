@@ -1,195 +1,110 @@
-#!/usr/bin/env python3
-"""
-Telegram Auto-Filter Bot - Complete Single File
-With All Features: Search, Clone, Logs, Admin
-"""
-
 import os
 import re
 import asyncio
 import logging
-import hashlib
-import pickle
 from datetime import datetime, timedelta
-from typing import List, Dict, Tuple, Optional, Any
-from collections import defaultdict
-
-# Pyrogram
+from typing import List, Dict, Optional
 from pyrogram import Client, filters, idle
 from pyrogram.types import (
     Message, InlineKeyboardMarkup,
     InlineKeyboardButton, CallbackQuery
 )
 from pyrogram.errors import UserNotParticipant
-
-# Load Environment
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure
 from dotenv import load_dotenv
+
 load_dotenv()
 
-# ============================================
-# CONFIGURATION
-# ============================================
-class Config:
-    API_ID = int(os.getenv("API_ID", 0))
-    API_HASH = os.getenv("API_HASH", "")
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-    MONGO_URL = os.getenv("MONGO_URL", "")
-    ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
-    LOG_CHANNEL = int(os.getenv("LOG_CHANNEL", 0))
-    FSUB_CHANNELS = list(map(int, os.getenv("FSUB_CHANNELS", "").split())) if os.getenv("FSUB_CHANNELS") else []
+# ==================== CONFIG ====================
+API_ID = int(os.getenv("API_ID", 0))
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+MONGO_URL = os.getenv("MONGO_URL", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+LOG_CHANNEL = int(os.getenv("LOG_CHANNEL", 0))
+FSUB_CHANNELS = [int(x) for x in os.getenv("FSUB_CHANNELS", "").split() if x]
 
-# ============================================
-# DATABASE (Simulated - For Single File)
-# ============================================
-class Database:
-    def __init__(self):
-        self.users = {}
-        self.files = []
-        self.clone_bots = {}
-        
-    async def add_user(self, user_id, name):
-        self.users[user_id] = {
-            "user_id": user_id,
-            "name": name,
-            "joined": datetime.now(),
-            "banned": False
-        }
-    
-    async def index_file(self, file_id, file_name, chat_id, message_id, caption=""):
-        self.files.append({
-            "file_id": file_id,
-            "file_name": file_name.lower(),
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "caption": caption,
-            "indexed_at": datetime.now()
-        })
-    
-    async def search_files(self, query, limit=50):
-        results = []
-        for file in self.files:
-            if query.lower() in file["file_name"]:
-                results.append(file)
-        return results[:limit]
+# ==================== DATABASE ====================
+try:
+    mongo = MongoClient(MONGO_URL)
+    db = mongo["auto_filter_bot"]
+    users_col = db["users"]
+    files_col = db["files"]
+    clone_bots_col = db["clone_bots"]
+    cache_col = db["cache"]
+    print("✅ MongoDB Connected")
+except ConnectionFailure:
+    print("❌ MongoDB Connection Failed")
+    exit(1)
 
-# ============================================
-# UTILITY CLASSES
-# ============================================
-class AdvancedFilter:
-    def extract_metadata(self, filename):
-        seasons = set()
-        qualities = set()
-        
-        # Season
-        season_match = re.search(r's(\d{1,2})', filename.lower())
-        if season_match:
-            seasons.add(f"S{season_match.group(1).zfill(2)}")
-        
-        # Quality
-        quality_match = re.search(r'(\d{3,4})p', filename.lower())
-        if quality_match:
-            qualities.add(f"{quality_match.group(1)}p")
-        
-        return {"seasons": seasons, "qualities": qualities}
-    
-    def group_by_season(self, files):
-        grouped = defaultdict(list)
-        for file in files:
-            metadata = self.extract_metadata(file["file_name"])
-            if metadata["seasons"]:
-                for season in metadata["seasons"]:
-                    grouped[season].append(file)
-            else:
-                grouped["NO_SEASON"].append(file)
-        return dict(grouped)
-
-class HelperFunctions:
-    @staticmethod
-    def get_time_greeting():
-        hour = datetime.now().hour
-        if 5 <= hour < 12:
-            return "🌅 Good Morning", "morning"
-        elif 12 <= hour < 17:
-            return "☀️ Good Afternoon", "afternoon"
-        elif 17 <= hour < 21:
-            return "🌇 Good Evening", "evening"
-        else:
-            return "🌙 Good Night", "night"
-    
-    @staticmethod
-    def truncate_text(text, max_length=50):
-        if len(text) <= max_length:
-            return text
-        return text[:max_length-3] + "..."
-
-class CallbackCache:
-    def __init__(self):
-        self.cache = {}
-    
-    async def store(self, user_id, data):
-        key = f"cache_{user_id}_{len(self.cache)}"
-        self.cache[key] = {
-            "data": data,
-            "user_id": user_id,
-            "time": datetime.now()
-        }
-        return key
-    
-    async def retrieve(self, key, user_id=None):
-        if key in self.cache:
-            data = self.cache[key]
-            # Check if expired (10 minutes)
-            if (datetime.now() - data["time"]).seconds < 600:
-                if user_id is None or data["user_id"] == user_id:
-                    return data["data"]
-        return None
-      # ============================================
-# BOT INITIALIZATION
-# ============================================
+# ==================== BOT CLIENT ====================
 app = Client(
     "auto_filter_bot",
-    api_id=Config.API_ID,
-    api_hash=Config.API_HASH,
-    bot_token=Config.BOT_TOKEN
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
 )
 
-# Initialize components
-db = Database()
-advanced_filter = AdvancedFilter()
-helpers = HelperFunctions()
-cache = CallbackCache()
+# ==================== UTILITY FUNCTIONS ====================
+def extract_season_quality(filename: str) -> Dict:
+    """Extract season and quality from filename"""
+    season_match = re.search(r's(\d{1,2})', filename.lower())
+    quality_match = re.search(r'(\d{3,4})p', filename.lower())
+    
+    return {
+        "season": f"S{season_match.group(1).zfill(2)}" if season_match else None,
+        "quality": f"{quality_match.group(1)}p" if quality_match else None
+    }
 
-# Global variables
-PAGE_SIZE = 10
-user_sessions = {}
+async def check_fsub(user_id: int) -> bool:
+    """Check force subscribe"""
+    if not FSUB_CHANNELS:
+        return True
+    
+    for channel in FSUB_CHANNELS:
+        try:
+            member = await app.get_chat_member(channel, user_id)
+            if member.status in ["left", "kicked"]:
+                return False
+        except:
+            pass
+    return True
 
-# ============================================
-# START COMMAND
-# ============================================
+# ==================== START COMMAND ====================
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client: Client, message: Message):
     user = message.from_user
     
-    # Add to database
-    await db.add_user(user.id, user.first_name)
+    # Add user to DB
+    users_col.update_one(
+        {"user_id": user.id},
+        {"$set": {
+            "first_name": user.first_name,
+            "username": user.username,
+            "last_active": datetime.now(),
+            "banned": False
+        }},
+        upsert=True
+    )
     
-    # Get greeting
-    greeting, _ = helpers.get_time_greeting()
-    
-    # Welcome message
+    # Welcome with photo
     welcome_text = f"""
-{greeting} **{user.first_name}!** 👋
+✨ **Welcome {user.first_name}!** ✨
 
-🎬 **I'm Auto-Filter Bot**
-Search movies/files in groups, get in PM!
+🎬 **Advanced Auto-Filter Bot**
+All-in-one solution for movie searching!
 
-**✨ Features:**
+⚡ **Features:**
 • 🔍 Smart search with filters
-• 📁 File delivery in PM
-• 🔄 Multi-bot clone system
-• 🎯 Force subscribe support
+• 📁 PM file delivery
+• 🔄 Clone bot system
+• 🎯 Force subscribe
+• 🗂️ Season/Quality filters
+• 👑 Admin panel
+• 📊 Statistics
 
-Add me to a group and start searching!
+🚀 **Add me to group and type any movie name!**
 """
     
     buttons = InlineKeyboardMarkup([
@@ -197,37 +112,43 @@ Add me to a group and start searching!
             InlineKeyboardButton("➕ Add to Group", 
                 url=f"https://t.me/{client.me.username}?startgroup=true"),
             InlineKeyboardButton("🌀 Clone Bot", 
-                callback_data="clone_bot")
+                callback_data="clone_info")
         ],
         [
             InlineKeyboardButton("📢 Updates", url="https://t.me/yourchannel"),
-            InlineKeyboardButton("ℹ️ Help", callback_data="help")
+            InlineKeyboardButton("⭐ Rate", url="https://t.me/yourchannel")
+        ],
+        [
+            InlineKeyboardButton("👑 Admin", callback_data="admin_panel"),
+            InlineKeyboardButton("📊 Stats", callback_data="stats")
         ]
     ])
     
+    # Send with photo
     try:
         await message.reply_photo(
-            photo="https://telegra.ph/file/8a9f2b6a6b0a8e7d5c0e3.jpg",
+            photo="https://graph.org/file/90d4e733c8e4c53337b97.jpg",  # Change to your photo
             caption=welcome_text,
             reply_markup=buttons
         )
     except:
         await message.reply(welcome_text, reply_markup=buttons)
     
-    # Log to admin
-    try:
-        await client.send_message(
-            Config.LOG_CHANNEL,
-            f"👤 New User: {user.first_name}\n"
-            f"🆔 ID: {user.id}\n"
-            f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-    except:
-        pass
+    # Log to channel
+    if LOG_CHANNEL:
+        try:
+            await client.send_message(
+                LOG_CHANNEL,
+                f"👤 **New User Started**\n\n"
+                f"🆔 ID: `{user.id}`\n"
+                f"👤 Name: {user.first_name}\n"
+                f"📛 Username: @{user.username or 'N/A'}\n"
+                f"📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        except:
+            pass
 
-# ============================================
-# AUTO-FILTER SEARCH
-# ============================================
+# ==================== AUTO FILTER WITH BUTTONS ====================
 @app.on_message(filters.group & filters.text)
 async def auto_filter(client: Client, message: Message):
     query = message.text.strip()
@@ -237,246 +158,444 @@ async def auto_filter(client: Client, message: Message):
     user_id = message.from_user.id
     
     # Force subscribe check
-    for channel in Config.FSUB_CHANNELS:
-        try:
-            member = await client.get_chat_member(channel, user_id)
-            if member.status in ["left", "kicked"]:
-                buttons = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("Join Channel", url=f"https://t.me/{channel}")
-                ]])
-                msg = await message.reply(
-                    "Please join our channel first!",
-                    reply_markup=buttons
-                )
-                await asyncio.sleep(10)
-                await msg.delete()
-                return
-        except:
-            pass
+    if not await check_fsub(user_id):
+        buttons = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FSUB_CHANNELS[0]}")
+        ]])
+        msg = await message.reply(
+            "⚠️ **Please join our channel first!**\n\n"
+            "You need to subscribe to use this bot.",
+            reply_markup=buttons
+        )
+        await asyncio.sleep(10)
+        await msg.delete()
+        return
     
-    # Search
-    search_msg = await message.reply("🔍 Searching...")
-    results = await db.search_files(query)
+    # Show searching
+    search_msg = await message.reply("🔍 **Searching...**")
+    
+    # Search in DB with regex
+    results = list(files_col.find(
+        {"file_name": {"$regex": query, "$options": "i"}}
+    ).limit(100))
     
     if not results:
-        await search_msg.edit("❌ No results found!")
+        await search_msg.edit("❌ **No results found!**")
         await asyncio.sleep(5)
         await search_msg.delete()
         return
     
-    # Group by season
-    season_groups = advanced_filter.group_by_season(results)
+    # Categorize by season
+    seasons = {}
+    for file in results:
+        metadata = extract_season_quality(file["file_name"])
+        if metadata["season"]:
+            if metadata["season"] not in seasons:
+                seasons[metadata["season"]] = []
+            seasons[metadata["season"]].append(file)
     
-    if len(season_groups) > 1:
-        # Show season selection
+    # Create buttons based on results
+    if len(seasons) > 1:
+        # Multiple seasons - show season selection
         buttons = []
-        for season in sorted(season_groups.keys())[:5]:
-            if season != 'NO_SEASON':
-                cache_key = await cache.store(user_id, {
-                    "type": "season",
-                    "season": season,
-                    "files": season_groups[season]
-                })
-                buttons.append([InlineKeyboardButton(
-                    f"📂 {season}", 
-                    callback_data=f"cache_{cache_key}"
-                )])
+        for season in sorted(seasons.keys())[:8]:  # Max 8 seasons
+            season_num = season.replace("S", "")
+            callback_data = f"season_{season_num}_{query}"
+            buttons.append([
+                InlineKeyboardButton(
+                    f"📂 {season} ({len(seasons[season])} files)",
+                    callback_data=callback_data
+                )
+            ])
         
         await search_msg.edit(
-            f"**Found {len(results)} results**\nSelect season:",
+            f"**🎬 Found {len(results)} results for '{query}'**\n\n"
+            f"**Select Season:**",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+    
+    elif len(seasons) == 1:
+        # Single season - show quality options
+        season = list(seasons.keys())[0]
+        files = seasons[season]
+        
+        # Extract qualities
+        qualities = set()
+        for file in files:
+            metadata = extract_season_quality(file["file_name"])
+            if metadata["quality"]:
+                qualities.add(metadata["quality"])
+        
+        buttons = []
+        row = []
+        for quality in sorted(qualities)[:4]:  # Max 4 qualities per row
+            callback_data = f"quality_{quality}_{season}_{query}"
+            row.append(InlineKeyboardButton(
+                f"🎚️ {quality}",
+                callback_data=callback_data
+            ))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+        
+        await search_msg.edit(
+            f"**📂 {season}**\n"
+            f"**Select Quality:**",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
     
     else:
-        # Show files directly
-        await display_files(client, search_msg, results[:PAGE_SIZE], query, 0, user_id)
+        # No season - show files directly
+        await show_files_page(client, search_msg, results, query, 0)
 
-async def display_files(client, message, files, query, page, user_id):
-    """Display files with pagination"""
-    start = page * PAGE_SIZE
-    end = start + PAGE_SIZE
+async def show_files_page(client, message, files, query, page):
+    """Show files with pagination"""
+    items_per_page = 8
+    start = page * items_per_page
+    end = start + items_per_page
     current_files = files[start:end]
     
-    if not current_files:
-        await message.edit("No more files!")
-        return
+    total_pages = (len(files) + items_per_page - 1) // items_per_page
     
-    text = f"**🔍 {query}**\n**Page {page+1}**\n\n"
+    text = f"**🔍 Results for: '{query}'**\n"
+    text += f"**📄 Page {page+1}/{total_pages}**\n\n"
+    
     buttons = []
     
     for i, file in enumerate(current_files, start+1):
-        display_name = helpers.truncate_text(file["file_name"], 40)
+        # Truncate filename
+        display_name = file["file_name"]
+        if len(display_name) > 35:
+            display_name = display_name[:32] + "..."
         
-        # Store file info in cache
-        cache_key = await cache.store(user_id, {
-            "type": "file",
-            "file_id": file["file_id"],
-            "chat_id": file["chat_id"],
-            "message_id": file["message_id"]
-        })
+        # Add quality info
+        metadata = extract_season_quality(file["file_name"])
+        quality_text = f" [{metadata['quality']}]" if metadata["quality"] else ""
         
-        buttons.append([InlineKeyboardButton(
-            f"📁 {i}. {display_name}",
-            callback_data=f"cache_{cache_key}"
-        )])
+        callback_data = f"send_{file['file_id']}_{file['chat_id']}_{file['message_id']}"
+        
+        buttons.append([
+            InlineKeyboardButton(
+                f"📁 {i}. {display_name}{quality_text}",
+                callback_data=callback_data
+            )
+        ])
     
-    # Pagination
+    # Pagination buttons
     nav_buttons = []
     if page > 0:
-        prev_cache = await cache.store(user_id, {
-            "type": "page", "query": query, "files": files, "page": page-1
-        })
-        nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"cache_{prev_cache}"))
-    
+        nav_buttons.append(
+            InlineKeyboardButton("⬅️ Previous", callback_data=f"page_{page-1}_{query}")
+        )
     if end < len(files):
-        next_cache = await cache.store(user_id, {
-            "type": "page", "query": query, "files": files, "page": page+1
-        })
-        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"cache_{next_cache}"))
+        nav_buttons.append(
+            InlineKeyboardButton("Next ➡️", callback_data=f"page_{page+1}_{query}")
+        )
     
     if nav_buttons:
         buttons.append(nav_buttons)
     
     await message.edit(text, reply_markup=InlineKeyboardMarkup(buttons))
-  # ============================================
-# CALLBACK QUERY HANDLER
-# ============================================
+
+# ==================== CALLBACK HANDLER ====================
 @app.on_callback_query()
-async def callback_handler(client: Client, callback_query: CallbackQuery):
-    data = callback_query.data
-    user_id = callback_query.from_user.id
+async def callback_handler(client: Client, callback: CallbackQuery):
+    data = callback.data
+    user_id = callback.from_user.id
     
-    if data.startswith("cache_"):
-        cache_key = data.split("_", 1)[1]
-        cached = await cache.retrieve(cache_key, user_id)
-        
-        if not cached:
-            await callback_query.answer("Session expired!", show_alert=True)
-            return
-        
-        data_type = cached.get("type")
-        
-        if data_type == "file":
-            # Send file to PM
-            try:
-                await client.copy_message(
-                    chat_id=user_id,
-                    from_chat_id=cached["chat_id"],
-                    message_id=cached["message_id"]
-                )
-                await callback_query.answer("✅ File sent to PM!", show_alert=True)
-            except:
-                await callback_query.answer("❌ Failed to send!", show_alert=True)
-            
-            # Delete group message after 15s
-            await asyncio.sleep(15)
-            await callback_query.message.delete()
-        
-        elif data_type == "season":
-            files = cached["files"]
-            season = cached["season"]
-            await display_files(client, callback_query.message, files, season, 0, user_id)
-        
-        elif data_type == "page":
-            files = cached["files"]
-            query = cached["query"]
-            page = cached["page"]
-            await display_files(client, callback_query.message, files, query, page, user_id)
+    # Force subscribe check for file sending
+    if data.startswith("send_") and not await check_fsub(user_id):
+        buttons = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FSUB_CHANNELS[0]}")
+        ]])
+        await callback.message.edit(
+            "⚠️ **Please join our channel first!**\n\n"
+            "You need to subscribe to download files.",
+            reply_markup=buttons
+        )
+        await callback.answer()
+        return
     
-    elif data == "clone_bot":
-        await callback_query.message.edit(
+    if data.startswith("send_"):
+        # Send file to PM
+        _, file_id, chat_id, message_id = data.split("_")
+        
+        try:
+            await client.copy_message(
+                chat_id=user_id,
+                from_chat_id=int(chat_id),
+                message_id=int(message_id)
+            )
+            await callback.answer("✅ File sent to your PM!", show_alert=True)
+        except Exception as e:
+            await callback.answer("❌ Failed to send file!", show_alert=True)
+        
+        # Delete group message after 15s
+        await asyncio.sleep(15)
+        await callback.message.delete()
+    
+    elif data.startswith("season_"):
+        # Season selected
+        _, season_num, query = data.split("_", 2)
+        season = f"S{season_num.zfill(2)}"
+        
+        # Search files for this season
+        results = list(files_col.find({
+            "file_name": {"$regex": query, "$options": "i"},
+            "file_name": {"$regex": f"season {season_num}|s{season_num}", "$options": "i"}
+        }))
+        
+        if results:
+            await show_files_page(client, callback.message, results, f"{query} - {season}", 0)
+        else:
+            await callback.answer("No files found!", show_alert=True)
+    
+    elif data.startswith("quality_"):
+        # Quality selected
+        _, quality, season, query = data.split("_", 3)
+        
+        # Search files with this quality
+        results = list(files_col.find({
+            "file_name": {"$regex": query, "$options": "i"},
+            "file_name": {"$regex": quality, "$options": "i"}
+        }))
+        
+        if results:
+            await show_files_page(client, callback.message, results, f"{query} - {quality}", 0)
+        else:
+            await callback.answer("No files found!", show_alert=True)
+    
+    elif data.startswith("page_"):
+        # Pagination
+        _, page_str, query = data.split("_", 2)
+        page = int(page_str)
+        
+        results = list(files_col.find(
+            {"file_name": {"$regex": query, "$options": "i"}}
+        ))
+        
+        if results:
+            await show_files_page(client, callback.message, results, query, page)
+        else:
+            await callback.answer("No results!", show_alert=True)
+    
+    elif data == "clone_info":
+        # Clone bot info
+        await callback.message.edit(
             "**🌀 Clone Bot System**\n\n"
+            "Create your own bot with my database!\n\n"
+            "**Steps:**\n"
             "1. Go to @BotFather\n"
             "2. Create new bot\n"
             "3. Send me the token\n\n"
-            "Your clone will use my database!",
+            "**Features your clone will have:**\n"
+            "• Same database\n"
+            "• All search features\n"
+            "• Force subscribe\n"
+            "• 24/7 hosting\n\n"
+            "Send your bot token now:",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("Back", callback_data="back")
+                InlineKeyboardButton("🔙 Back", callback_data="back_to_start")
             ]])
         )
     
-    elif data == "back":
-        greeting, _ = helpers.get_time_greeting()
-        await callback_query.message.edit(
-            f"{greeting}! What would you like to do?",
+    elif data == "admin_panel":
+        if user_id == ADMIN_ID:
+            total_users = users_col.count_documents({})
+            total_files = files_col.count_documents({})
+            
+            await callback.message.edit(
+                f"**👑 Admin Panel**\n\n"
+                f"👥 Users: {total_users}\n"
+                f"📁 Files: {total_files}\n"
+                f"🤖 Bot: @{client.me.username}\n\n"
+                f"**Commands:**\n"
+                f"/index - Index channel\n"
+                f"/stats - Statistics\n"
+                f"/broadcast - Send message\n"
+                f"/logs - View logs",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("📊 Stats", callback_data="stats"),
+                        InlineKeyboardButton("📢 Broadcast", callback_data="broadcast_menu")
+                    ],
+                    [
+                        InlineKeyboardButton("🔙 Back", callback_data="back_to_start")
+                    ]
+                ])
+            )
+        else:
+            await callback.answer("❌ Admin only!", show_alert=True)
+    
+    elif data == "stats":
+        total_users = users_col.count_documents({})
+        total_files = files_col.count_documents({})
+        
+        await callback.message.edit(
+            f"**📊 Bot Statistics**\n\n"
+            f"👥 Total Users: {total_users}\n"
+            f"📁 Total Files: {total_files}\n"
+            f"🔄 MongoDB: Connected\n"
+            f"⚡ Status: Running\n"
+            f"🤖 Username: @{client.me.username}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Back", callback_data="back_to_start")
+            ]])
+        )
+    
+    elif data == "back_to_start":
+        user = callback.from_user
+        await callback.message.edit(
+            f"✨ **Welcome back {user.first_name}!**\n\n"
+            "Ready to search movies?",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("➕ Add to Group", 
                         url=f"https://t.me/{client.me.username}?startgroup=true"),
                     InlineKeyboardButton("🌀 Clone Bot", 
-                        callback_data="clone_bot")
+                        callback_data="clone_info")
+                ],
+                [
+                    InlineKeyboardButton("👑 Admin", callback_data="admin_panel"),
+                    InlineKeyboardButton("📊 Stats", callback_data="stats")
                 ]
             ])
         )
     
-    await callback_query.answer()
+    await callback.answer()
 
-# ============================================
-# ADMIN COMMANDS
-# ============================================
-@app.on_message(filters.command("stats") & filters.user(Config.ADMIN_ID))
-async def stats_command(client, message):
-    user_count = len(db.users)
-    file_count = len(db.files)
+# ==================== CLONE BOT TOKEN HANDLER ====================
+@app.on_message(filters.private & filters.regex(r'^\d+:[\w-]+$'))
+async def handle_token(client: Client, message: Message):
+    """Handle clone bot token"""
+    token = message.text.strip()
+    user_id = message.from_user.id
     
-    text = f"""
-📊 **Bot Statistics**
+    # Save to database
+    clone_bots_col.update_one(
+        {"user_id": user_id},
+        {"$set": {
+            "token": token,
+            "created_at": datetime.now(),
+            "owner": message.from_user.first_name,
+            "active": True
+        }},
+        upsert=True
+    )
+    
+    await message.reply(
+        "✅ **Clone bot created successfully!**\n\n"
+        "Your clone bot will:\n"
+        "• Use the same database\n"
+        "• Have all features\n"
+        "• Work 24/7\n\n"
+        "Start your bot by visiting:\n"
+        f"https://t.me/BotFather\n\n"
+        "**Token saved securely!**"
+    )
+    
+    # Log to channel
+    if LOG_CHANNEL:
+        try:
+            await client.send_message(
+                LOG_CHANNEL,
+                f"🌀 **New Clone Bot Created**\n\n"
+                f"👤 Owner: {message.from_user.mention}\n"
+                f"🆔 ID: `{user_id}`\n"
+                f"🤖 Token: `{token[:15]}...`\n"
+                f"📅 Time: {datetime.now().strftime('%H:%M:%S')}"
+            )
+        except:
+            pass
 
-👥 Users: {user_count}
-📁 Files: {file_count}
-
-🟢 Bot Status: Running
-"""
-    await message.reply(text)
-
-@app.on_message(filters.command("index") & filters.user(Config.ADMIN_ID))
-async def index_command(client, message):
+# ==================== ADMIN COMMANDS ====================
+@app.on_message(filters.command("index") & filters.user(ADMIN_ID))
+async def index_channel(client: Client, message: Message):
     if len(message.command) < 2:
-        await message.reply("Usage: /index channel_id")
+        await message.reply("Usage: `/index channel_id`", quote=True)
         return
     
     try:
         channel_id = int(message.command[1])
-        msg = await message.reply("Indexing...")
+        status = await message.reply("⏳ **Indexing started...**")
         
         count = 0
-        async for msg_obj in client.iter_history(channel_id):
-            if msg_obj.video or msg_obj.document:
-                file_name = msg_obj.video.file_name if msg_obj.video else msg_obj.document.file_name
-                file_id = msg_obj.video.file_id if msg_obj.video else msg_obj.document.file_id
+        async for msg in client.iter_history(channel_id):
+            if msg.video or msg.document:
+                file_name = msg.video.file_name if msg.video else msg.document.file_name
+                file_id = msg.video.file_id if msg.video else msg.document.file_id
                 
-                await db.index_file(
-                    file_id=file_id,
-                    file_name=file_name,
-                    chat_id=channel_id,
-                    message_id=msg_obj.id
+                files_col.update_one(
+                    {"file_id": file_id},
+                    {"$set": {
+                        "file_id": file_id,
+                        "file_name": file_name.lower(),
+                        "chat_id": channel_id,
+                        "message_id": msg.id,
+                        "caption": msg.caption or "",
+                        "indexed_at": datetime.now()
+                    }},
+                    upsert=True
                 )
                 count += 1
         
-        await msg.edit(f"✅ Indexed {count} files!")
-        
-        # Log to channel
-        try:
-            await client.send_message(
-                Config.LOG_CHANNEL,
-                f"📁 Indexed {count} files from {channel_id}"
-            )
-        except:
-            pass
+        await status.edit(f"✅ **Indexed {count} files!**")
         
     except Exception as e:
-        await message.reply(f"❌ Error: {e}")
+        await message.reply(f"❌ Error: {str(e)}")
 
-# ============================================
-# BOT RUNNER
-# ============================================
-# bot.py - LAST LINES ONLY:
+@app.on_message(filters.command("broadcast") & filters.user(ADMIN_ID))
+async def broadcast_message(client: Client, message: Message):
+    if not message.reply_to_message:
+        await message.reply("Reply to a message to broadcast!", quote=True)
+        return
+    
+    users = users_col.find({})
+    total = users_col.count_documents({})
+    
+    status = await message.reply(f"📢 Broadcasting to {total} users...")
+    
+    success = 0
+    failed = 0
+    
+    for user in users:
+        try:
+            await client.copy_message(
+                chat_id=user["user_id"],
+                from_chat_id=message.chat.id,
+                message_id=message.reply_to_message.id
+            )
+            success += 1
+            await asyncio.sleep(0.1)  # Avoid flood
+        except:
+            failed += 1
+    
+    await status.edit(f"✅ **Broadcast Complete!**\n\n✅ Success: {success}\n❌ Failed: {failed}")
+
+# ==================== BOT RUNNER ====================
 async def main():
     await app.start()
     bot = await app.get_me()
-    print(f"✅ Bot Started: @{bot.username}")
-    print("📢 Bot is now running!")
+    
+    print("="*50)
+    print(f"🤖 BOT STARTED: @{bot.username}")
+    print(f"👥 Users: {users_col.count_documents({})}")
+    print(f"📁 Files: {files_col.count_documents({})}")
+    print(f"🔄 MongoDB: Connected")
+    print(f"⚡ Force Sub: {'Enabled' if FSUB_CHANNELS else 'Disabled'}")
+    print(f"👑 Admin: {ADMIN_ID}")
+    print("="*50)
+    print("✅ Bot is now running!")
+    print("="*50)
+    
     await idle()
 
-# ✅ NO CODE AFTER THIS LINE
-# ✅ Let app.py import and run this
+if __name__ == "__main__":
+    try:
+        app.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Bot stopped by user")
+    except Exception as e:
+        print(f"❌ Error: {e}")
