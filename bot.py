@@ -591,11 +591,4 @@ async def main():
     print("="*50)
     
     await idle()
-
-if __name__ == "__main__":
-    try:
-        app.run(main())
-    except KeyboardInterrupt:
-        print("\n👋 Bot stopped by user")
-    except Exception as e:
-        print(f"❌ Error: {e}")
+    
